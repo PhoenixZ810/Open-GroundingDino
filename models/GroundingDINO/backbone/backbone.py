@@ -174,7 +174,7 @@ def build_backbone(args):
     train_backbone = True
     if not train_backbone:
         raise ValueError("Please set lr_backbone > 0")
-    return_interm_indices = args.return_interm_indices
+    return_interm_indices = args.return_interm_indices  # 输出中间层数
     assert return_interm_indices in [[0, 1, 2, 3], [1, 2, 3], [3]]
     args.backbone_freeze_keywords
     use_checkpoint = getattr(args, "use_checkpoint", False)
@@ -212,7 +212,7 @@ def build_backbone(args):
         return_interm_indices
     ), f"len(bb_num_channels) {len(bb_num_channels)} != len(return_interm_indices) {len(return_interm_indices)}"
 
-    model = Joiner(backbone, position_embedding)
+    model = Joiner(backbone, position_embedding)  # feature + position
     model.num_channels = bb_num_channels
     assert isinstance(
         bb_num_channels, List

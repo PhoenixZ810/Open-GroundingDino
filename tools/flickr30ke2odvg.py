@@ -12,7 +12,7 @@ def get_sentence_data(fn):
 
     input:
       fn - full file path to the sentence file to parse
-    
+
     output:
       a list of dictionaries for each sentence with the following fields:
           sentence - the original sentence
@@ -22,7 +22,7 @@ def get_sentence_data(fn):
                       first_word_index - the position of the first word of
                                          the phrase in the sentence
                       phrase_id - an identifier for this phrase
-                      phrase_type - a list of the coarse categories this 
+                      phrase_type - a list of the coarse categories this
                                     phrase belongs to
 
     """
@@ -88,11 +88,11 @@ def get_annotations(fn):
           nobox - list of identifiers which were annotated as
                   not being visible in the image
           boxes - a dictionary where the fields are identifiers
-                  and the values are its list of boxes in the 
+                  and the values are its list of boxes in the
                   [xmin ymin xmax ymax] format
     """
-    tree = ET.parse(fn)
-    root = tree.getroot()
+    tree = ET.parse(fn)  #解析xml
+    root = tree.getroot()  #
     filename = root.findall('filename')[0].text
     size_container = root.findall('size')[0]
     anno_info = {'filename': filename, 'boxes' : {}, 'scene' : [], 'nobox' : []}
@@ -103,7 +103,7 @@ def get_annotations(fn):
         for names in object_container.findall('name'):
             box_id = names.text
             box_container = object_container.findall('bndbox')
-            if len(box_container) > 0:
+            if len(box_container) > 0:  #若有box，则存储
                 if box_id not in anno_info['boxes']:
                     anno_info['boxes'][box_id] = []
                 xmin = int(box_container[0].findall('xmin')[0].text) - 1
@@ -111,6 +111,8 @@ def get_annotations(fn):
                 xmax = int(box_container[0].findall('xmax')[0].text) - 1
                 ymax = int(box_container[0].findall('ymax')[0].text) - 1
                 anno_info['boxes'][box_id].append([xmin, ymin, xmax, ymax])
+            # 若没有box，说明该物体在图片中没有框，查询nobndbox获取文本内容，若大于零说明对象在图片中不可见；
+            # 查询scene元素，若大于零说明该物体和整个场景相关，将该实体的标识符添加到scene字段
             else:
                 nobndbox = int(object_container.findall('nobndbox')[0].text)
                 if nobndbox > 0:
@@ -128,7 +130,7 @@ def gen_record(sd, an):
     regions = []
     for ph in sd["phrases"]:
         if ph["phrase_id"] in an["boxes"]:
-            for box in an["boxes"][ph["phrase_id"]]:
+            for box in an["boxes"][ph["phrase_id"]]:  # 若选出的sentence中的phrase有box标注，则将所有box均加入regions
                 regions.append(
                     {
                         "phrase": ph["phrase"],
@@ -166,12 +168,12 @@ if __name__ == "__main__":
     for idx in tqdm(range(len_anno)):
         sds = get_sentence_data(sentence_list[idx])
         an = get_annotations(annotation_list[idx])
-        if args.osoi:
-            sd = sds[random.randint(0, len(sds)-1)] 
+        if args.osoi:  # 五选一
+            sd = sds[random.randint(0, len(sds)-1)]  # 随机五选一个sentence+phrase
             x = gen_record(sd, an)
             if x:
                 odvg_anno.append(x)
-        else:
+        else:  # 所有sentence
             for sd in sds:
                 x = gen_record(sd, an)
                 if x:

@@ -50,8 +50,6 @@ from .utils import MLP, ContrastiveEmbed, sigmoid_focal_loss
 from .matcher import build_matcher
 
 
-
-
 class GroundingDINO(nn.Module):
     """This is the Cross-Attention Detector module that performs object detection"""
 
@@ -173,9 +171,7 @@ class GroundingDINO(nn.Module):
         if dec_pred_bbox_embed_share:
             box_embed_layerlist = [_bbox_embed for i in range(transformer.num_decoder_layers)]
         else:
-            box_embed_layerlist = [
-                copy.deepcopy(_bbox_embed) for i in range(transformer.num_decoder_layers)
-            ]
+            box_embed_layerlist = [copy.deepcopy(_bbox_embed) for i in range(transformer.num_decoder_layers)]
         class_embed_layerlist = [_class_embed for i in range(transformer.num_decoder_layers)]
         self.bbox_embed = nn.ModuleList(box_embed_layerlist)
         self.class_embed = nn.ModuleList(class_embed_layerlist)
@@ -236,7 +232,7 @@ class GroundingDINO(nn.Module):
 
         tokenized = self.tokenizer(captions, padding="longest", return_tensors="pt").to(
             samples.device
-        )
+        )  # 对batch中的caption_list进行tokenize
         one_hot_token = tokenized
 
         (
@@ -245,22 +241,22 @@ class GroundingDINO(nn.Module):
             cate_to_token_mask_list,
         ) = generate_masks_with_special_tokens_and_transfer_map(
             tokenized, self.specical_tokens, self.tokenizer
-        )
+        )  # 对规定的special token之间的真实内容进行标记
 
         if text_self_attention_masks.shape[1] > self.max_text_len:
-            text_self_attention_masks = text_self_attention_masks[
-                :, : self.max_text_len, : self.max_text_len
-            ]
+            text_self_attention_masks = text_self_attention_masks[:, : self.max_text_len, : self.max_text_len]
             position_ids = position_ids[:, : self.max_text_len]
             tokenized["input_ids"] = tokenized["input_ids"][:, : self.max_text_len]
             tokenized["attention_mask"] = tokenized["attention_mask"][:, : self.max_text_len]
             tokenized["token_type_ids"] = tokenized["token_type_ids"][:, : self.max_text_len]
 
-        # extract text embeddings
+        # extract text embeddings，防止不同phrase之间互相干扰
         if self.sub_sentence_present:
             tokenized_for_encoder = {k: v for k, v in tokenized.items() if k != "attention_mask"}
-            tokenized_for_encoder["attention_mask"] = text_self_attention_masks
-            tokenized_for_encoder["position_ids"] = position_ids
+            tokenized_for_encoder[
+                "attention_mask"
+            ] = text_self_attention_masks  # 加入special tokenize之后self attention mask
+            tokenized_for_encoder["position_ids"] = position_ids  # 加入special tokenize之后的position id
         else:
             tokenized_for_encoder = tokenized
 
@@ -275,9 +271,7 @@ class GroundingDINO(nn.Module):
             encoded_text = encoded_text[:, : self.max_text_len, :]
             text_token_mask = text_token_mask[:, : self.max_text_len]
             position_ids = position_ids[:, : self.max_text_len]
-            text_self_attention_masks = text_self_attention_masks[
-                :, : self.max_text_len, : self.max_text_len
-            ]
+            text_self_attention_masks = text_self_attention_masks[:, : self.max_text_len, : self.max_text_len]
 
         text_dict = {
             "encoded_text": encoded_text,  # bs, 195, d_model
@@ -286,18 +280,17 @@ class GroundingDINO(nn.Module):
             "text_self_attention_masks": text_self_attention_masks,  # bs, 195,195
         }
 
-
         if isinstance(samples, (list, torch.Tensor)):
             samples = nested_tensor_from_tensor_list(samples)
-        features, poss = self.backbone(samples)
+        features, poss = self.backbone(samples)  # feature+position
         srcs = []
         masks = []
-        for l, feat in enumerate(features):
+        for l, feat in enumerate(features):  # 前3层仅将通道变换为256
             src, mask = feat.decompose()
             srcs.append(self.input_proj[l](src))
             masks.append(mask)
             assert mask is not None
-        if self.num_feature_levels > len(srcs):
+        if self.num_feature_levels > len(srcs):  # 同时对最后一层做了3*3的卷积
             _len_srcs = len(srcs)
             for l in range(_len_srcs, self.num_feature_levels):
                 if l == _len_srcs:
@@ -314,9 +307,8 @@ class GroundingDINO(nn.Module):
         input_query_bbox = input_query_label = attn_mask = dn_meta = None
         hs, reference, hs_enc, ref_enc, init_box_proposal = self.transformer(
             srcs, masks, input_query_bbox, poss, input_query_label, attn_mask, text_dict
-        )
+        )  # encoder端融合
 
-        
         # deformable-detr-like anchor update
         outputs_coord_list = []
         for dec_lid, (layer_ref_sig, layer_bbox_embed, layer_hs) in enumerate(
@@ -324,25 +316,19 @@ class GroundingDINO(nn.Module):
         ):
             layer_delta_unsig = layer_bbox_embed(layer_hs)
             layer_outputs_unsig = layer_delta_unsig + inverse_sigmoid(layer_ref_sig)
-            layer_outputs_unsig = layer_outputs_unsig.sigmoid()
+            layer_outputs_unsig = layer_outputs_unsig.sigmoid()  # [bs, num_query, 4]
             outputs_coord_list.append(layer_outputs_unsig)
-        outputs_coord_list = torch.stack(outputs_coord_list)
-
+        outputs_coord_list = torch.stack(outputs_coord_list)  # [num_decoder_layer, bs, num_query, 4]
 
         outputs_class = torch.stack(
-            [
-                layer_cls_embed(layer_hs, text_dict)
-                for layer_cls_embed, layer_hs in zip(self.class_embed, hs)
-            ]
+            [layer_cls_embed(layer_hs, text_dict) for layer_cls_embed, layer_hs in zip(self.class_embed, hs)]
         )
 
         out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord_list[-1]}
 
         # Used to calculate losses
         bs, len_td = text_dict['text_token_mask'].shape
-        out['text_mask']=torch.zeros(bs, self.max_text_len, dtype=torch.bool).to(
-            samples.device
-        )
+        out['text_mask'] = torch.zeros(bs, self.max_text_len, dtype=torch.bool).to(samples.device)
         for b in range(bs):
             for j in range(len_td):
                 if text_dict['text_token_mask'][b][j] == True:
@@ -351,14 +337,17 @@ class GroundingDINO(nn.Module):
         # for intermediate outputs
         if self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord_list)
-        out['token']=one_hot_token
+        out['token'] = one_hot_token
         # # for encoder output
         if hs_enc is not None:
             # prepare intermediate outputs
             interm_coord = ref_enc[-1]
             interm_class = self.transformer.enc_out_class_embed(hs_enc[-1], text_dict)
             out['interm_outputs'] = {'pred_logits': interm_class, 'pred_boxes': interm_coord}
-            out['interm_outputs_for_matching_pre'] = {'pred_logits': interm_class, 'pred_boxes': init_box_proposal}
+            out['interm_outputs_for_matching_pre'] = {
+                'pred_logits': interm_class,
+                'pred_boxes': init_box_proposal,
+            }
 
         # outputs['pred_logits'].shape
         # torch.Size([4, 900, 256])
@@ -382,7 +371,6 @@ class GroundingDINO(nn.Module):
         # outputs['interm_outputs'].keys()
         # dict_keys(['pred_logits', 'pred_boxes', 'one_hot', 'text_mask'])
 
-
         # outputs['interm_outputs_for_matching_pre'].keys()
         # dict_keys(['pred_logits', 'pred_boxes'])
 
@@ -396,17 +384,12 @@ class GroundingDINO(nn.Module):
         # this is a workaround to make torchscript happy, as torchscript
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
-        return [
-            {"pred_logits": a, "pred_boxes": b}
-            for a, b in zip(outputs_class[:-1], outputs_coord[:-1])
-        ]
-
-
+        return [{"pred_logits": a, "pred_boxes": b} for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
 
 
 class SetCriterion(nn.Module):
-    def __init__(self, matcher, weight_dict, focal_alpha,focal_gamma, losses):
-        """ Create the criterion.
+    def __init__(self, matcher, weight_dict, focal_alpha, focal_gamma, losses):
+        """Create the criterion.
         Parameters:
             matcher: module able to compute a matching between targets and proposals
             weight_dict: dict containing as key the names of the losses and as values their relative weight.
@@ -418,11 +401,11 @@ class SetCriterion(nn.Module):
         self.weight_dict = weight_dict
         self.losses = losses
         self.focal_alpha = focal_alpha
-        self.focal_gamma= focal_gamma
+        self.focal_gamma = focal_gamma
 
     @torch.no_grad()
     def loss_cardinality(self, outputs, targets, indices, num_boxes):
-        """ Compute the cardinality error, ie the absolute error in the number of predicted non-empty boxes
+        """Compute the cardinality error, ie the absolute error in the number of predicted non-empty boxes
         This is not really a loss, it is intended for logging purposes only. It doesn't propagate gradients
         """
 
@@ -437,8 +420,8 @@ class SetCriterion(nn.Module):
 
     def loss_boxes(self, outputs, targets, indices, num_boxes):
         """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
-           targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
-           The target boxes are expected in format (center_x, center_y, w, h), normalized by the image size.
+        targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
+        The target boxes are expected in format (center_x, center_y, w, h), normalized by the image size.
         """
         assert 'pred_boxes' in outputs
         idx = self._get_src_permutation_idx(indices)
@@ -450,9 +433,11 @@ class SetCriterion(nn.Module):
         losses = {}
         losses['loss_bbox'] = loss_bbox.sum() / num_boxes
 
-        loss_giou = 1 - torch.diag(box_ops.generalized_box_iou(
-            box_ops.box_cxcywh_to_xyxy(src_boxes),
-            box_ops.box_cxcywh_to_xyxy(target_boxes)))
+        loss_giou = 1 - torch.diag(
+            box_ops.generalized_box_iou(
+                box_ops.box_cxcywh_to_xyxy(src_boxes), box_ops.box_cxcywh_to_xyxy(target_boxes)
+            )
+        )
         losses['loss_giou'] = loss_giou.sum() / num_boxes
 
         # calculate the x,y and h,w loss
@@ -460,28 +445,28 @@ class SetCriterion(nn.Module):
             losses['loss_xy'] = loss_bbox[..., :2].sum() / num_boxes
             losses['loss_hw'] = loss_bbox[..., 2:].sum() / num_boxes
 
-
         return losses
 
-
     def token_sigmoid_binary_focal_loss(self, outputs, targets, indices, num_boxes):
-        pred_logits=outputs['pred_logits']
-        new_targets=outputs['one_hot'].to(pred_logits.device)
-        text_mask=outputs['text_mask']
+        pred_logits = outputs['pred_logits']
+        new_targets = outputs['one_hot'].to(pred_logits.device)
+        text_mask = outputs['text_mask']
 
-        assert (new_targets.dim() == 3)
-        assert (pred_logits.dim() == 3)  # batch x from x to
-        
+        assert new_targets.dim() == 3
+        assert pred_logits.dim() == 3  # batch x from x to
+
         bs, n, _ = pred_logits.shape
-        alpha=self.focal_alpha
-        gamma=self.focal_gamma
+        alpha = self.focal_alpha
+        gamma = self.focal_gamma
         if text_mask is not None:
-            # ODVG: each sample has different mask 
-            text_mask = text_mask.repeat(1, pred_logits.size(1)).view(outputs['text_mask'].shape[0],-1,outputs['text_mask'].shape[1])
+            # ODVG: each sample has different mask
+            text_mask = text_mask.repeat(1, pred_logits.size(1)).view(
+                outputs['text_mask'].shape[0], -1, outputs['text_mask'].shape[1]
+            )
             pred_logits = torch.masked_select(pred_logits, text_mask)
             new_targets = torch.masked_select(new_targets, text_mask)
 
-        new_targets=new_targets.float()
+        new_targets = new_targets.float()
         p = torch.sigmoid(pred_logits)
         ce_loss = F.binary_cross_entropy_with_logits(pred_logits, new_targets, reduction="none")
         p_t = p * new_targets + (1 - p) * (1 - new_targets)
@@ -491,15 +476,14 @@ class SetCriterion(nn.Module):
             alpha_t = alpha * new_targets + (1 - alpha) * (1 - new_targets)
             loss = alpha_t * loss
 
-        total_num_pos=0
+        total_num_pos = 0
         for batch_indices in indices:
             total_num_pos += len(batch_indices[0])
-        num_pos_avg_per_gpu = max(total_num_pos , 1.0)
-        loss=loss.sum()/num_pos_avg_per_gpu
-        
+        num_pos_avg_per_gpu = max(total_num_pos, 1.0)
+        loss = loss.sum() / num_pos_avg_per_gpu
+
         losses = {'loss_ce': loss}
         return losses
-
 
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
@@ -523,32 +507,37 @@ class SetCriterion(nn.Module):
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
 
     def forward(self, outputs, targets, cat_list, caption, return_indices=False):
-        """ This performs the loss computation.
+        """This performs the loss computation.
         Parameters:
              outputs: dict of tensors, see the output specification of the model for the format
              targets: list of dicts, such that len(targets) == batch_size.
                       The expected keys in each dict depends on the losses applied, see each loss' doc
-            
+
              return_indices: used for vis. if True, the layer0-5 indices will be returned as well.
         """
-        device=next(iter(outputs.values())).device
-        one_hot = torch.zeros(outputs['pred_logits'].size(),dtype=torch.int64) # torch.Size([bs, 900, 256])
-        token = outputs['token'] 
-        
+        import pdb
+
+        pdb.set_trace()
+        device = next(iter(outputs.values())).device
+        one_hot = torch.zeros(
+            outputs['pred_logits'].size(), dtype=torch.int64
+        )  # class result, torch.Size([bs, 900, 256])
+        token = outputs['token']  # 经过tokenizer之后的caption sentence
+
         label_map_list = []
         indices = []
-        for j in range(len(cat_list)): # bs
-            label_map=[]
+        for j in range(len(cat_list)):  # bs
+            label_map = []
             for i in range(len(cat_list[j])):
-                label_id=torch.tensor([i])
-                per_label=create_positive_map(token[j], label_id, cat_list[j], caption[j])
+                label_id = torch.tensor([i])
+                per_label = create_positive_map(token[j], label_id, cat_list[j], caption[j])
                 label_map.append(per_label)
-            label_map=torch.stack(label_map,dim=0).squeeze(1)
-            label_map_list.append(label_map)
-        for j in range(len(cat_list)): # bs
+            label_map = torch.stack(label_map, dim=0).squeeze(1)  # len(cat_list)*256
+            label_map_list.append(label_map)  # len=bs
+        for j in range(len(cat_list)):  # bs
             for_match = {
-                "pred_logits" : outputs['pred_logits'][j].unsqueeze(0),
-                "pred_boxes" : outputs['pred_boxes'][j].unsqueeze(0)
+                "pred_logits": outputs['pred_logits'][j].unsqueeze(0),  # [1, 900, 256]
+                "pred_boxes": outputs['pred_boxes'][j].unsqueeze(0),  # [1, 900, 4]
             }
             inds = self.matcher(for_match, [targets[j]], label_map_list[j])
             indices.extend(inds)
@@ -557,11 +546,11 @@ class SetCriterion(nn.Module):
         # - index_j is the indices of the corresponding selected targets (in order)
 
         # import pdb; pdb.set_trace()
-        tgt_ids = [v["labels"].cpu() for v in targets]
+        tgt_ids = [v["labels"].cpu() for v in targets]  # cate_ids for img in bs
         # len(tgt_ids) == bs
         for i in range(len(indices)):
-            tgt_ids[i]=tgt_ids[i][indices[i][1]]
-            one_hot[i,indices[i][0]] = label_map_list[i][tgt_ids[i]].to(torch.long)
+            tgt_ids[i] = tgt_ids[i][indices[i][1]]
+            one_hot[i, indices[i][0]] = label_map_list[i][tgt_ids[i]].to(torch.long)  # 将class embedding转换为id
         outputs['one_hot'] = one_hot
         if return_indices:
             indices0_copy = indices
@@ -584,24 +573,24 @@ class SetCriterion(nn.Module):
         if 'aux_outputs' in outputs:
             for idx, aux_outputs in enumerate(outputs['aux_outputs']):
                 indices = []
-                for j in range(len(cat_list)): # bs
+                for j in range(len(cat_list)):  # bs
                     aux_output_single = {
-                        'pred_logits' : aux_outputs['pred_logits'][j].unsqueeze(0),
-                        'pred_boxes': aux_outputs['pred_boxes'][j].unsqueeze(0)
+                        'pred_logits': aux_outputs['pred_logits'][j].unsqueeze(0),
+                        'pred_boxes': aux_outputs['pred_boxes'][j].unsqueeze(0),
                     }
                     inds = self.matcher(aux_output_single, [targets[j]], label_map_list[j])
                     indices.extend(inds)
-                one_hot_aux = torch.zeros(outputs['pred_logits'].size(),dtype=torch.int64)
+                one_hot_aux = torch.zeros(outputs['pred_logits'].size(), dtype=torch.int64)
                 for i in range(len(indices)):
-                    tgt_ids[i]=tgt_ids[i][indices[i][1]]
-                    one_hot_aux[i,indices[i][0]] = label_map_list[i][tgt_ids[i]].to(torch.long)
+                    tgt_ids[i] = tgt_ids[i][indices[i][1]]
+                    one_hot_aux[i, indices[i][0]] = label_map_list[i][tgt_ids[i]].to(torch.long)
                 aux_outputs['one_hot'] = one_hot_aux
                 aux_outputs['text_mask'] = outputs['text_mask']
                 if return_indices:
                     indices_list.append(indices)
                 for loss in self.losses:
                     kwargs = {}
-                    l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_boxes, **kwargs)                
+                    l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_boxes, **kwargs)
                     l_dict = {k + f'_{idx}': v for k, v in l_dict.items()}
                     losses.update(l_dict)
 
@@ -609,17 +598,17 @@ class SetCriterion(nn.Module):
         if 'interm_outputs' in outputs:
             interm_outputs = outputs['interm_outputs']
             indices = []
-            for j in range(len(cat_list)): # bs
+            for j in range(len(cat_list)):  # bs
                 interm_output_single = {
-                    'pred_logits' : interm_outputs['pred_logits'][j].unsqueeze(0),
-                    'pred_boxes': interm_outputs['pred_boxes'][j].unsqueeze(0)
+                    'pred_logits': interm_outputs['pred_logits'][j].unsqueeze(0),
+                    'pred_boxes': interm_outputs['pred_boxes'][j].unsqueeze(0),
                 }
                 inds = self.matcher(interm_output_single, [targets[j]], label_map_list[j])
                 indices.extend(inds)
-            one_hot_aux = torch.zeros(outputs['pred_logits'].size(),dtype=torch.int64)
+            one_hot_aux = torch.zeros(outputs['pred_logits'].size(), dtype=torch.int64)
             for i in range(len(indices)):
-                tgt_ids[i]=tgt_ids[i][indices[i][1]]
-                one_hot_aux[i,indices[i][0]] = label_map_list[i][tgt_ids[i]].to(torch.long)
+                tgt_ids[i] = tgt_ids[i][indices[i][1]]
+                one_hot_aux[i, indices[i][0]] = label_map_list[i][tgt_ids[i]].to(torch.long)
             interm_outputs['one_hot'] = one_hot_aux
             interm_outputs['text_mask'] = outputs['text_mask']
             if return_indices:
@@ -638,38 +627,126 @@ class SetCriterion(nn.Module):
 
 
 class PostProcess(nn.Module):
-    """ This module converts the model's output into the format expected by the coco api"""
-    def __init__(self, num_select=100,text_encoder_type='text_encoder_type', nms_iou_threshold=-1,use_coco_eval=False,args=None) -> None:
+    """This module converts the model's output into the format expected by the coco api"""
+
+    def __init__(
+        self,
+        num_select=100,
+        text_encoder_type='text_encoder_type',
+        nms_iou_threshold=-1,
+        use_coco_eval=False,
+        args=None,
+    ) -> None:
         super().__init__()
         self.num_select = num_select
         self.tokenizer = get_tokenlizer.get_tokenlizer(text_encoder_type)
         if args.use_coco_eval:
             from pycocotools.coco import COCO
+
             coco = COCO(args.coco_val_path)
             category_dict = coco.loadCats(coco.getCatIds())
             cat_list = [item['name'] for item in category_dict]
         else:
-            cat_list=args.label_list
+            cat_list = args.label_list
         caption = " . ".join(cat_list) + ' .'
         tokenized = self.tokenizer(caption, padding="longest", return_tensors="pt")
         label_list = torch.arange(len(cat_list))
-        pos_map=create_positive_map(tokenized,label_list,cat_list,caption)
+        pos_map = create_positive_map(tokenized, label_list, cat_list, caption)
         # build a mapping from label_id to pos_map
         if args.use_coco_eval:
-            id_map = {0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8, 8: 9, 9: 10, 10: 11, 11: 13, 12: 14, 13: 15, 14: 16, 15: 17, 16: 18, 17: 19, 18: 20, 19: 21, 20: 22, 21: 23, 22: 24, 23: 25, 24: 27, 25: 28, 26: 31, 27: 32, 28: 33, 29: 34, 30: 35, 31: 36, 32: 37, 33: 38, 34: 39, 35: 40, 36: 41, 37: 42, 38: 43, 39: 44, 40: 46,
-                    41: 47, 42: 48, 43: 49, 44: 50, 45: 51, 46: 52, 47: 53, 48: 54, 49: 55, 50: 56, 51: 57, 52: 58, 53: 59, 54: 60, 55: 61, 56: 62, 57: 63, 58: 64, 59: 65, 60: 67, 61: 70, 62: 72, 63: 73, 64: 74, 65: 75, 66: 76, 67: 77, 68: 78, 69: 79, 70: 80, 71: 81, 72: 82, 73: 84, 74: 85, 75: 86, 76: 87, 77: 88, 78: 89, 79: 90}
+            id_map = {
+                0: 1,
+                1: 2,
+                2: 3,
+                3: 4,
+                4: 5,
+                5: 6,
+                6: 7,
+                7: 8,
+                8: 9,
+                9: 10,
+                10: 11,
+                11: 13,
+                12: 14,
+                13: 15,
+                14: 16,
+                15: 17,
+                16: 18,
+                17: 19,
+                18: 20,
+                19: 21,
+                20: 22,
+                21: 23,
+                22: 24,
+                23: 25,
+                24: 27,
+                25: 28,
+                26: 31,
+                27: 32,
+                28: 33,
+                29: 34,
+                30: 35,
+                31: 36,
+                32: 37,
+                33: 38,
+                34: 39,
+                35: 40,
+                36: 41,
+                37: 42,
+                38: 43,
+                39: 44,
+                40: 46,
+                41: 47,
+                42: 48,
+                43: 49,
+                44: 50,
+                45: 51,
+                46: 52,
+                47: 53,
+                48: 54,
+                49: 55,
+                50: 56,
+                51: 57,
+                52: 58,
+                53: 59,
+                54: 60,
+                55: 61,
+                56: 62,
+                57: 63,
+                58: 64,
+                59: 65,
+                60: 67,
+                61: 70,
+                62: 72,
+                63: 73,
+                64: 74,
+                65: 75,
+                66: 76,
+                67: 77,
+                68: 78,
+                69: 79,
+                70: 80,
+                71: 81,
+                72: 82,
+                73: 84,
+                74: 85,
+                75: 86,
+                76: 87,
+                77: 88,
+                78: 89,
+                79: 90,
+            }
             new_pos_map = torch.zeros((91, 256))
             for k, v in id_map.items():
                 new_pos_map[v] = pos_map[k]
-            pos_map=new_pos_map
+            pos_map = new_pos_map
 
-
-        self.nms_iou_threshold=nms_iou_threshold
+        self.nms_iou_threshold = nms_iou_threshold
         self.positive_map = pos_map
 
     @torch.no_grad()
     def forward(self, outputs, target_sizes, not_to_xyxy=False, test=False):
-        """ Perform the computation
+        """Perform the computation
         Parameters:
             outputs: raw outputs of the model
             target_sizes: tensor of dimension [batch_size x 2] containing the size of each images of the batch
@@ -679,12 +756,11 @@ class PostProcess(nn.Module):
         num_select = self.num_select
         out_logits, out_bbox = outputs['pred_logits'], outputs['pred_boxes']
 
-
         prob_to_token = out_logits.sigmoid()
         pos_maps = self.positive_map.to(prob_to_token.device)
         for label_ind in range(len(pos_maps)):
             if pos_maps[label_ind].sum() != 0:
-                pos_maps[label_ind]=pos_maps[label_ind]/pos_maps[label_ind].sum()
+                pos_maps[label_ind] = pos_maps[label_ind] / pos_maps[label_ind].sum()
 
         prob_to_label = prob_to_token @ pos_maps.T
 
@@ -704,17 +780,20 @@ class PostProcess(nn.Module):
         # if test:
         #     assert not not_to_xyxy
         #     boxes[:,:,2:] = boxes[:,:,2:] - boxes[:,:,:2]
-        boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1,1,4))
-        
+        boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1, 1, 4))
+
         # and from relative [0, 1] to absolute [0, height] coordinates
         img_h, img_w = target_sizes.unbind(1)
         scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
         boxes = boxes * scale_fct[:, None, :]
 
         if self.nms_iou_threshold > 0:
-            item_indices = [nms(b, s, iou_threshold=self.nms_iou_threshold) for b,s in zip(boxes, scores)]
+            item_indices = [nms(b, s, iou_threshold=self.nms_iou_threshold) for b, s in zip(boxes, scores)]
 
-            results = [{'scores': s[i], 'labels': l[i], 'boxes': b[i]} for s, l, b, i in zip(scores, labels, boxes, item_indices)]
+            results = [
+                {'scores': s[i], 'labels': l[i], 'boxes': b[i]}
+                for s, l, b, i in zip(scores, labels, boxes, item_indices)
+            ]
         else:
             results = [{'scores': s, 'labels': l, 'boxes': b} for s, l, b in zip(scores, labels, boxes)]
         results = [{'scores': s, 'labels': l, 'boxes': b} for s, l, b in zip(scores, labels, boxes)]
@@ -754,16 +833,12 @@ def build_groundingdino(args):
         max_text_len=args.max_text_len,
     )
 
-
-
     matcher = build_matcher(args)
 
     # prepare weight dict
     weight_dict = {'loss_ce': args.cls_loss_coef, 'loss_bbox': args.bbox_loss_coef}
     weight_dict['loss_giou'] = args.giou_loss_coef
     clean_weight_dict_wo_dn = copy.deepcopy(weight_dict)
-
-    
 
     clean_weight_dict = copy.deepcopy(weight_dict)
 
@@ -789,29 +864,45 @@ def build_groundingdino(args):
             interm_loss_coef = args.interm_loss_coef
         except:
             interm_loss_coef = 1.0
-        interm_weight_dict.update({k + f'_interm': v * interm_loss_coef * _coeff_weight_dict[k] for k, v in clean_weight_dict_wo_dn.items()})
+        interm_weight_dict.update(
+            {
+                k + f'_interm': v * interm_loss_coef * _coeff_weight_dict[k]
+                for k, v in clean_weight_dict_wo_dn.items()
+            }
+        )
         weight_dict.update(interm_weight_dict)
 
     # losses = ['labels', 'boxes', 'cardinality']
     losses = ['labels', 'boxes']
 
-    criterion = SetCriterion(matcher=matcher, weight_dict=weight_dict,
-                             focal_alpha=args.focal_alpha, focal_gamma=args.focal_gamma,losses=losses
-                             )
+    criterion = SetCriterion(
+        matcher=matcher,
+        weight_dict=weight_dict,
+        focal_alpha=args.focal_alpha,
+        focal_gamma=args.focal_gamma,
+        losses=losses,
+    )
     criterion.to(device)
-    postprocessors = {'bbox': PostProcess(num_select=args.num_select  , text_encoder_type=args.text_encoder_type,nms_iou_threshold=args.nms_iou_threshold,args=args)}
+    postprocessors = {
+        'bbox': PostProcess(
+            num_select=args.num_select,
+            text_encoder_type=args.text_encoder_type,
+            nms_iou_threshold=args.nms_iou_threshold,
+            args=args,
+        )
+    }
 
     return model, criterion, postprocessors
 
-def create_positive_map(tokenized, tokens_positive,cat_list,caption):
+
+def create_positive_map(tokenized, tokens_positive, cat_list, caption):
     """construct a map such that positive_map[i,j] = True iff box i is associated to token j"""
-    positive_map = torch.zeros((len(tokens_positive), 256), dtype=torch.float)
-
-    for j,label in enumerate(tokens_positive):
-
-        start_ind = caption.find(cat_list[label])
+    positive_map = torch.zeros((len(tokens_positive), 256), dtype=torch.float)  # 1,256
+    # 查找输入cat_list中的每个label在caption sentence的token中的位置
+    for j, label in enumerate(tokens_positive):
+        start_ind = caption.find(cat_list[label])  # 按照字符长度
         end_ind = start_ind + len(cat_list[label]) - 1
-        beg_pos = tokenized.char_to_token(start_ind)
+        beg_pos = tokenized.char_to_token(start_ind)  # 按照token数目（单词）
         try:
             end_pos = tokenized.char_to_token(end_ind - 1)
         except:
@@ -849,7 +940,5 @@ def create_positive_map(tokenized, tokens_positive,cat_list,caption):
         if beg_pos > end_pos:
             continue
         # assert beg_pos is not None and end_pos is not None
-        positive_map[j,beg_pos: end_pos + 1].fill_(1)
-    return positive_map 
-
-
+        positive_map[j, beg_pos : end_pos + 1].fill_(1)
+    return positive_map

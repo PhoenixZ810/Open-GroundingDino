@@ -74,8 +74,6 @@ def gen_encoder_output_proposals(
         valid_H = torch.sum(~mask_flatten_[:, :, 0, 0], 1)
         valid_W = torch.sum(~mask_flatten_[:, 0, :, 0], 1)
 
-        # import ipdb; ipdb.set_trace()
-
         grid_y, grid_x = torch.meshgrid(
             torch.linspace(0, H_ - 1, H_, dtype=torch.float32, device=memory.device),
             torch.linspace(0, W_ - 1, W_, dtype=torch.float32, device=memory.device),
@@ -83,25 +81,23 @@ def gen_encoder_output_proposals(
         grid = torch.cat([grid_x.unsqueeze(-1), grid_y.unsqueeze(-1)], -1)  # H_, W_, 2
 
         scale = torch.cat([valid_W.unsqueeze(-1), valid_H.unsqueeze(-1)], 1).view(N_, 1, 1, 2)
-        grid = (grid.unsqueeze(0).expand(N_, -1, -1, -1) + 0.5) / scale
+        grid = (grid.unsqueeze(0).expand(N_, -1, -1, -1) + 0.5) / scale  # 点坐标 (bs,w,h,2)
 
         if learnedwh is not None:
             # import ipdb; ipdb.set_trace()
             wh = torch.ones_like(grid) * learnedwh.sigmoid() * (2.0**lvl)
-        else:
-            wh = torch.ones_like(grid) * 0.05 * (2.0**lvl)
+        else:  # 对于不同的特征类别采用不同大小的anchor高度和宽度
+            wh = torch.ones_like(grid) * 0.05 * (2.0**lvl)  # 宽高 (bs,w,h,2)
 
         # scale = torch.cat([W_[None].unsqueeze(-1), H_[None].unsqueeze(-1)], 1).view(1, 1, 1, 2).repeat(N_, 1, 1, 1)
         # grid = (grid.unsqueeze(0).expand(N_, -1, -1, -1) + 0.5) / scale
         # wh = torch.ones_like(grid) / scale
-        proposal = torch.cat((grid, wh), -1).view(N_, -1, 4)
+        proposal = torch.cat((grid, wh), -1).view(N_, -1, 4)  # bs, hw, 4
         proposals.append(proposal)
-        _cur += H_ * W_
-    # import ipdb; ipdb.set_trace()
+
+    """排除无效的proposal以及对应的memory"""
     output_proposals = torch.cat(proposals, 1)
-    output_proposals_valid = ((output_proposals > 0.01) & (output_proposals < 0.99)).all(
-        -1, keepdim=True
-    )
+    output_proposals_valid = ((output_proposals > 0.01) & (output_proposals < 0.99)).all(-1, keepdim=True)
     output_proposals = torch.log(output_proposals / (1 - output_proposals))  # unsigmoid
     output_proposals = output_proposals.masked_fill(memory_padding_mask.unsqueeze(-1), float("inf"))
     output_proposals = output_proposals.masked_fill(~output_proposals_valid, float("inf"))
@@ -117,12 +113,8 @@ def gen_encoder_output_proposals(
 
 
 class RandomBoxPerturber:
-    def __init__(
-        self, x_noise_scale=0.2, y_noise_scale=0.2, w_noise_scale=0.2, h_noise_scale=0.2
-    ) -> None:
-        self.noise_scale = torch.Tensor(
-            [x_noise_scale, y_noise_scale, w_noise_scale, h_noise_scale]
-        )
+    def __init__(self, x_noise_scale=0.2, y_noise_scale=0.2, w_noise_scale=0.2, h_noise_scale=0.2) -> None:
+        self.noise_scale = torch.Tensor([x_noise_scale, y_noise_scale, w_noise_scale, h_noise_scale])
 
     def __call__(self, refanchors: Tensor) -> Tensor:
         nq, bs, query_dim = refanchors.shape
@@ -136,7 +128,12 @@ class RandomBoxPerturber:
 
 
 def sigmoid_focal_loss(
-    inputs, targets, num_boxes, alpha: float = 0.25, gamma: float = 2, no_reduction=False
+    inputs,
+    targets,
+    num_boxes,
+    alpha: float = 0.25,
+    gamma: float = 2,
+    no_reduction=False,
 ):
     """
     Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
@@ -175,9 +172,7 @@ class MLP(nn.Module):
         super().__init__()
         self.num_layers = num_layers
         h = [hidden_dim] * (num_layers - 1)
-        self.layers = nn.ModuleList(
-            nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim])
-        )
+        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
 
     def forward(self, x):
         for i, layer in enumerate(self.layers):
@@ -206,7 +201,7 @@ def gen_sineembed_for_position(pos_tensor):
     # sineembed_tensor = torch.zeros(n_query, bs, 256)
     scale = 2 * math.pi
     dim_t = torch.arange(128, dtype=torch.float32, device=pos_tensor.device)
-    dim_t = 10000 ** (2 * (torch.div(dim_t, 2, rounding_mode='floor')) / 128)
+    dim_t = 10000 ** (2 * (torch.div(dim_t, 2, rounding_mode="floor")) / 128)
     x_embed = pos_tensor[:, :, 0] * scale
     y_embed = pos_tensor[:, :, 1] * scale
     pos_x = x_embed[:, :, None] / dim_t
@@ -258,16 +253,15 @@ class ContrastiveEmbed(nn.Module):
         # print(text_dict)
 
         # import pdb;pdb.set_trace()
-        y = text_dict["encoded_text"]  #torch.Size([2, 195, 256])
+        y = text_dict["encoded_text"]  # torch.Size([2, 195, 256])
         text_token_mask = text_dict["text_token_mask"]
 
+        # 接着，对res进行掩码操作，将未使用的文本token（即padding的token）对应的得分置为负无穷float("-inf")。这是为了在计算相似度时，排除padding部分的影响。
         res = x @ y.transpose(-1, -2)
         res.masked_fill_(~text_token_mask[:, None, :], float("-inf"))
-        # 接着，对res进行掩码操作，将未使用的文本token（即padding的token）对应的得分置为负无穷float("-inf")。这是为了在计算相似度时，排除padding部分的影响。
 
-
-        # padding to max_text_len
+        # padding to max_text_len，对最后一维填充到max_text_len，填充值为负无穷float("-inf")
         new_res = torch.full((*res.shape[:-1], self.max_text_len), float("-inf"), device=res.device)
-        new_res[..., : res.shape[-1]] = res  #torch.Size([2, 16320, 195])
+        new_res[..., : res.shape[-1]] = res  # torch.Size([2, 16320, 195])
 
         return new_res

@@ -172,16 +172,17 @@ class BiMultiHeadAttention(nn.Module):
 
         src_len = key_states.size(1)
         attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))  # bs*nhead, nimg, ntxt
+        #QK相乘获得language对vision的attention weight
 
         if attn_weights.size() != (bsz * self.num_heads, tgt_len, src_len):
             raise ValueError(
                 f"Attention weights should be of size {(bsz * self.num_heads, tgt_len, src_len)}, but is {attn_weights.size()}"
             )
 
-        if self.stable_softmax_2d:
+        if self.stable_softmax_2d:  # attention weight减去最大值，提高稳定性
             attn_weights = attn_weights - attn_weights.max()
 
-        if self.clamp_min_for_underflow:
+        if self.clamp_min_for_underflow:  # 对attention weight进行上下限截断，防止溢出
             attn_weights = torch.clamp(
                 attn_weights, min=-50000
             )  # Do not increase -50000, data type half has quite limited range
@@ -191,7 +192,7 @@ class BiMultiHeadAttention(nn.Module):
             )  # Do not increase 50000, data type half has quite limited range
 
         attn_weights_T = attn_weights.transpose(1, 2)
-        attn_weights_l = attn_weights_T - torch.max(attn_weights_T, dim=-1, keepdim=True)[0]
+        attn_weights_l = attn_weights_T - torch.max(attn_weights_T, dim=-1, keepdim=True)[0]  # language对vision的attention weight
         if self.clamp_min_for_underflow:
             attn_weights_l = torch.clamp(
                 attn_weights_l, min=-50000
@@ -206,7 +207,7 @@ class BiMultiHeadAttention(nn.Module):
             attention_mask_v = (
                 attention_mask_v[:, None, None, :].repeat(1, self.num_heads, 1, 1).flatten(0, 1)
             )
-            attn_weights_l.masked_fill_(attention_mask_v, float("-inf"))
+            attn_weights_l.masked_fill_(attention_mask_v, float("-inf")) # mask掉vision的padding部分
 
         attn_weights_l = attn_weights_l.softmax(dim=-1)
 
@@ -215,7 +216,7 @@ class BiMultiHeadAttention(nn.Module):
             attention_mask_l = (
                 attention_mask_l[:, None, None, :].repeat(1, self.num_heads, 1, 1).flatten(0, 1)
             )
-            attn_weights.masked_fill_(attention_mask_l, float("-inf"))
+            attn_weights.masked_fill_(attention_mask_l, float("-inf"))  # mask掉language的padding部分
         attn_weights_v = attn_weights.softmax(dim=-1)
 
         attn_probs_v = F.dropout(attn_weights_v, p=self.dropout, training=self.training)

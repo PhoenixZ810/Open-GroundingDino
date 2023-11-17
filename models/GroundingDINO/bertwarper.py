@@ -234,37 +234,37 @@ def generate_masks_with_special_tokens_and_transfer_map(tokenized, special_token
     # special_tokens_mask: bs, num_token. 1 for special tokens. 0 for normal tokens
     special_tokens_mask = torch.zeros((bs, num_token), device=input_ids.device).bool()
     for special_token in special_tokens_list:
-        special_tokens_mask |= input_ids == special_token
+        special_tokens_mask |= input_ids == special_token  # 将每个inputs_ids中特殊token的位置标记为1
 
     # idxs: each row is a list of indices of special tokens
-    idxs = torch.nonzero(special_tokens_mask)
+    idxs = torch.nonzero(special_tokens_mask)  #定位非零元素的位置
 
     # generate attention mask and positional ids
     attention_mask = (
-        torch.eye(num_token, device=input_ids.device).bool().unsqueeze(0).repeat(bs, 1, 1)
+        torch.eye(num_token, device=input_ids.device).bool().unsqueeze(0).repeat(bs, 1, 1)  # 对角线全1，其他位置全0，代表两个token之间是否有特殊标记
     )
     position_ids = torch.zeros((bs, num_token), device=input_ids.device)
     cate_to_token_mask_list = [[] for _ in range(bs)]
     previous_col = 0
-    for i in range(idxs.shape[0]):
+    for i in range(idxs.shape[0]):  # 对于每个特殊token，标记attention和position
         row, col = idxs[i]
         if (col == 0) or (col == num_token - 1):
             attention_mask[row, col, col] = True
             position_ids[row, col] = 0
         else:
-            attention_mask[row, previous_col + 1 : col + 1, previous_col + 1 : col + 1] = True
+            attention_mask[row, previous_col + 1 : col + 1, previous_col + 1 : col + 1] = True  # 在每个特殊token之间的attention mask标记为true
             position_ids[row, previous_col + 1 : col + 1] = torch.arange(
                 0, col - previous_col, device=input_ids.device
-            )
+            )  # 每个特殊token之间的位置标记为0,1,2,3...
             c2t_maski = torch.zeros((num_token), device=input_ids.device).bool()
             c2t_maski[previous_col + 1 : col] = True
-            cate_to_token_mask_list[row].append(c2t_maski)
+            cate_to_token_mask_list[row].append(c2t_maski)  # 对每个bs，记录每个特殊token之间的位置
         previous_col = col
 
     cate_to_token_mask_list = [
         torch.stack(cate_to_token_mask_listi, dim=0)
         for cate_to_token_mask_listi in cate_to_token_mask_list
-    ]
+    ]  # list_len=4，每一项标记special token之间种类的位置
 
     # # padding mask
     # padding_mask = tokenized['attention_mask']

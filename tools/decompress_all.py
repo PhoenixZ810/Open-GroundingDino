@@ -26,7 +26,7 @@ def untar(tar):
         os.system(f'rm -rf {tar_dir}')
     print(f'{tar} decompressing')
     tar_dirname = os.path.dirname(tar_dir)
-    os.system(f'tar -zxf {tar} -C {tar_dirname}')
+    os.system(f'tar -xf {tar} -C {tar_dirname}')
     return os.path.basename(tar)
 
 

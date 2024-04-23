@@ -151,6 +151,9 @@ checkpoints/
 
 **.pth
 **.json
+**.jsonl
+**.jpg
+
 # Pyre type checker
 .pyre/
 

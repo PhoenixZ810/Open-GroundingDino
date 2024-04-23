@@ -2,9 +2,13 @@ import json
 import argparse
 import os
 from multiprocessing import Pool
+from joblib import Parallel, delayed
 from tqdm import tqdm
 import random
 from functools import partial
+import spacy
+import time
+import jsonlines
 
 parser = argparse.ArgumentParser(description="Read json")
 parser.add_argument('file', type=str)
@@ -56,26 +60,32 @@ def judge_json(j):
     #     return [f'{b}/{c}/{d}', 'v2']
 
 
-def multi_judge_jsonl(jsonl):
+def multi_judge_jsonl(f):
     false_file = []
     pool = Pool(processes=args.process)
     with pool as pool:
-        iters = pool.imap(func=judge_jsonl, iterable=jsonl)
+        iters = pool.imap(func=judge_jsonl, iterable=f)
         for iter in tqdm(iters):
             if iter[1] == 'false':
                 print(iter[0] + 'not exist')
                 false_file.append(iter[0])
+    print(false_file)
 
 
 def judge_jsonl(jsonl):
     j = json.loads(jsonl)
     '''extract image from jsonl'''
-    rel_path = os.path.join(j['filename'][0:5], j['filename'])
+    # # grit
+    # rel_path = os.path.join(j['filename'][0:5], j['filename'])
+    rel_path = j['filename']
     absolute_path = os.path.join(
         '/mnt/workspace/zhaoxiangyu/open-groundingdino/data/grit_processed/images', rel_path
     )
-    os.system('cp ' + absolute_path + ' data/grit_275/images/')
-    return [j['filename'], 'pass']
+    # os.system('cp ' + absolute_path + ' data/grit_275/images/')
+    if os.path.exists(absolute_path):
+        return [j['filename'], 'pass']
+    else:
+        return [j['filename'], 'false']
     '''check image exist'''
     # a, b, c, d = j['filename'].split('/')
     # if f'{c}/{d}' in [
@@ -86,7 +96,6 @@ def judge_jsonl(jsonl):
     #     return [f'{c}/{d}', 'false']
     # else:
     #     return [j, 'pass']
-
 
 def random_sample(json):
     images = json['images']
@@ -135,13 +144,14 @@ def main(args):
         print('loading...')
         # #lower json
         # lower_json(f)
-        # #judge jsonl
-        # multi_judge_jsonl(f)
+
+        #judge jsonl
+        multi_judge_jsonl(f)
+
+
         # #judge json
-        j = json.load(f)
+        # j = json.load(f)
         # generate_o365v1_labelmap(j)
-        import pdb
-        pdb.set_trace()
         # print('loading comlete')
         # multi_judge_json(j)
 
